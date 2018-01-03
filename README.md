@@ -1,17 +1,3 @@
----
-title: '**GyMBo**: A **Gy**m **M**onitoring Ro**bo**t'
-author: "Demetri Pananos"
-output:
-  html_document:
-    df_print: paged
-  html_notebook: default
-  pdf_document: default
-  md_document:
-    variant: markdown_github
----
-
-
-
 
 
 
