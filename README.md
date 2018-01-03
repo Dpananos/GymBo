@@ -23,7 +23,7 @@ No one likes a crowded gym, so information about gym usage is essential for patr
 
 Generating a predictive model is a tall order, and so in this project we take only the first step.  Tweets are scraped from the gym's twitter account and temporal trends are examined to attempt to understand how the gym is being used over time.  Feature engineering for time series machine learning is also performed with the aid of the `timetk` library.  A modest model is created using linear regression and turned into a tweeting robot. For now, we'll focus on data pertaining to the weight room as a proof of concept.
 
-#Obtaining and Extracting Usage 
+## Obtaining and Extracting Usage 
 
 The Western Rec Centre operates a twitter account which periodically tweets out how many students are in the weight room and cardio mezzanine.  Recent tweets are easily accessed through the `twitteR` library.  A set of keys is required to access the API.  Once keys are obtained, the last 3200 tweets from any given account are available to users.  The API returns various metadata about the tweets made.  Of particular interest are the tweet text, the date created, and the unique id assigned to the tweet (this will become valuable for storing tweets in a sqlite database for posterity). 
 
