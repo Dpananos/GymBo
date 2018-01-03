@@ -48,7 +48,7 @@ library(grid)
 Sys.setenv(TZ = 'America/Toronto')
 ```
 
-#Introduction
+# Introduction
 
 No one likes a crowded gym, so information about gym usage is essential for existing and would be exercisers.  Fortunately, Western's Rec Centre tweets out how many students are currently in the weight room and cardio mezzanine throughout the day.  Though useful to instantaneously get an estimate of usage, the tweets hold no predictive power.  A predictive model of gym usage would be valuable to students wanting to plan a workout as well as gym management looking to effectively allocate labour. 
 
@@ -60,7 +60,7 @@ grid.raster(img)
 
 Generating a predictive model is a tall order, and so in this project we take only the first step.  Tweets are scraped from the gym's twitter account and temporal trends are examined to attempt to understand how the gym is being used over time.  Feature engineering for time series machine learning is also performed with the aid of the `timetk` library.  A modest model is created using linear regression and turned into a tweeting robot. For now, we'll focus on data pertaining to the weight room as a proof of concept.
 
-#Obtaining and Extracting Usage 
+# Obtaining and Extracting Usage 
 
 The Western Rec Centre operates a twitter account which periodically tweets out how many students are in the weight room and cardio mezzanine.  Recent tweets are easily accessed through the `twitteR` library.  A set of keys is required to access the API (not provided with this assignment due to privacy), but users are free to request their own and insert them into the code so as to run the collection.  Once keys are obtained, the last 3200 tweets from any given account are available to users.  The API returns various metadata about the tweets made.  Of particular interest are the tweet text, the date created, and the unique id assigned to the tweet (this will become valuable for storing tweets in a sqlite database for posterity). 
 
@@ -200,7 +200,7 @@ dbDisconnect(con)
 ```
 
 
-#Extracting Important Time Features
+# Extracting Important Time Features
 
 We are primarily interested in day to day changes in the number of students.  However, there may exist dynamics on the time scale of weeks, or months, that we would miss by only considering day to day or hour to hour trends.  For this reason, we leverage the use of `timetk` to extract other time information.  Doing so produces a dataframe with many columns, several of which are redundant.  Here, we choose just a few which we believe to be of particular importance to the problem.  In particular, we extract: weekday, day of year, month, week of month, week of year.  We also create feautures for time, date, if the day is a weekend, if the day has any particular significance (e.g. Homecoming or Holidays), and the number of days until the significant days end (for instance, the Saturday of Thanksgiving has a value of 3 since there are 3 days until school starts again).
 
@@ -291,7 +291,7 @@ gd<- gd %>%
 ```
 
 
-#Plots of Trends
+# Plots of Trends
 
 The time features allow examination of usage trends at several granularities.  Examining the trends on a monthly level shows a clear change in students's behaviour as the semester progresses.  In September, the peak gym usage occurs somewhere between 5 PM and 7PM.  As the months progress, peak usage occurs later, somewhere around 8 PM.  
 
@@ -344,7 +344,7 @@ gd %>%
 ```
 
 
-#Modelling Considerations
+# Modelling Considerations
 
 There are several considertions to be made before modelling the process can begin.  The first is that prediction for this specific problem is essentially a time series problem. However the times between observations are not uniformly spaced. The gym seems to try to tweet every thirty minutes, but on the rare occasion is delayed upwards of 50 minutes.  Observations could be rounded to the nearest hour or half hour in order to account for this. A summary statistic could also be chosen to be applied to all dates (e.g. the median), and this summary statistic could be forcasted through the use of time series methods.
 
@@ -536,7 +536,7 @@ future_series %>%
   theme(legend.position = 'bottom')
 ```
 
-#Conclusions, Discussion, and Next Steps
+# Conclusions, Discussion, and Next Steps
 
 The model is far from ideal. The residuals from the regression exhibit correlation, are ever so slightly positvely skewed, and the model can not account for sudden drops in usage due to holidays, exams, etc.  Furthermore, time is not the only variable that is informative for gym usage.  Weather (either too hot or too cold, the probability of precipitation, etc) has an enormous impact on gym usage, but as of now no weather data has been captured.  Including data on month or if the day is "special" often results in zero variance features for most window lengths, and so the impact of these features are hard to estimate using the methods implemented for this particular model.  Information on class schedules may also be useful.  It could be the case that sporadic increases in gym usage are due to classes letting out, or that dips in usage are due to the start of large classes.  The impact of class scheduling is purely conjecture at this moment.
 
