@@ -15,8 +15,6 @@ output:
 
 
 
-The following is a hobby project that turned into a class assignment, which earned me a class mark of 100%.  Pretty proud of that one.  Want to see the code?  Check out the R notebook on my [Github](https://github.com/Dpananos/GymBo)!
-
 
 ## Introduction
 
