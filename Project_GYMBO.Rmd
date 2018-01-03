@@ -1,0 +1,552 @@
+---
+title: '**GyMBo**: A **Gy**m **M**onitoring Ro**bo**t'
+author: "Demetri Pananos"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r,include = F}
+library(knitr)
+
+knitr::opts_chunk$set(warnings = F, 
+                      message = F, 
+                      cache = F, 
+                      dpi = 400, 
+                      echo = F, 
+                      out.width = '75%',
+                      fig.align = 'center',
+                      fig.path = 'Figs/'
+                      )
+
+```
+
+
+```{r setup, echo = F, warning = F, message = F}     
+library(tidyverse)
+library(twitteR)
+library(RSQLite)
+library(lubridate)
+library(stringr)
+library(purrr)
+library(timetk)
+library(stargazer)
+library(tidyquant)
+library(forecast)
+library(forcats)
+library(cowplot)
+library(magrittr)
+library(viridis)
+library(caret)
+library(png)
+library(grid)
+
+# theme_set(theme_minimal())
+
+Sys.setenv(TZ = 'America/Toronto')
+```
+
+#Introduction
+
+No one likes a crowded gym, so information about gym usage is essential for existing and would be exercisers.  Fortunately, Western's Rec Centre tweets out how many students are currently in the weight room and cardio mezzanine throughout the day.  Though useful to instantaneously get an estimate of usage, the tweets hold no predictive power.  A predictive model of gym usage would be valuable to students wanting to plan a workout as well as gym management looking to effectively allocate labour. 
+
+```{r out.width = '75%',echo=FALSE, fig.cap='A typical tweet from the gym.  WR stands for Weight Room.  CM stands for Cardio mezzanine.  The description of the account explains they intend to tweet every 30 minutes. Somtimes they make typos, but hey, no one is perfect.'}
+
+img <- readPNG("Figs/WR_ex.png")
+grid.raster(img)
+```
+
+Generating a predictive model is a tall order, and so in this project we take only the first step.  Tweets are scraped from the gym's twitter account and temporal trends are examined to attempt to understand how the gym is being used over time.  Feature engineering for time series machine learning is also performed with the aid of the `timetk` library.  A modest model is created using linear regression and turned into a tweeting robot. For now, we'll focus on data pertaining to the weight room as a proof of concept.
+
+#Obtaining and Extracting Usage 
+
+The Western Rec Centre operates a twitter account which periodically tweets out how many students are in the weight room and cardio mezzanine.  Recent tweets are easily accessed through the `twitteR` library.  A set of keys is required to access the API (not provided with this assignment due to privacy), but users are free to request their own and insert them into the code so as to run the collection.  Once keys are obtained, the last 3200 tweets from any given account are available to users.  The API returns various metadata about the tweets made.  Of particular interest are the tweet text, the date created, and the unique id assigned to the tweet (this will become valuable for storing tweets in a sqlite database for posterity). 
+
+The tweets are in english and though while consistent, may not always be in a dependable format. Using the library `stringr`, a heuristic is followed to determine the number of students in the weight room.  The twitter account usually uses 'WR' to indicate 'Weight Room', so the script will parse the tweets for the occurance of 'WR' in the tweet.  If 'WR' is in the tweet (accounting for capitalization, puncuation, etc), then the script will extract the largest integer present in the tweet and use this as the number of students in the weight room (the weight room ususally has more patrons than the cardio mezzanine.  This is the heuristic).  If neither an integer nor 'WR' appear in the script, -1 is returned.  This data is written to a sqlite database with the unique identifier used as the primary key.  Table 1 is a sample of what the database contains.
+
+
+\begin{table}[ht!]
+\centering
+\begin{tabular}{rlllr}
+  \hline
+ & id & created & text & WR \\ 
+  \hline
+1 & 924416733640888320 & 2017-10-28 19:24:58 & WR 65 CM 16 & 65.00 \\ 
+  2 & 924409455080607745 & 2017-10-28 18:56:03 & WR 86 CM 19 & 86.00 \\ 
+  3 & 924397559849848833 & 2017-10-28 18:08:47 & WR 102 CM 27 & 102.00 \\ 
+  4 & 924380444614909953 & 2017-10-28 17:00:46 & WR 122 CM 47 & 122.00 \\ 
+  5 & 924373350629199872 & 2017-10-28 16:32:35 & 114 WR \&amp; 39 CM & 114.00 \\ 
+   \hline
+\end{tabular}
+\caption{Contents of the database.  The heuristic works quite well as can be seen through this small sample.  The data is kept for posterity and is automatically added to the database everytime the notebook is run.  In the future, the data will be valuable to compare trends across longer timelines.  It may also be valuable when examining policy changes, such as changing opening/closing times}
+\end{table}
+
+
+```{r, include = F}
+
+  #keys.RDS is a data.frame housing:
+  # -Consumer Key
+  # -Consumer Secret
+  # -Access Token
+  # -Access Secret
+  #
+  # If you choose to obtain keys to access the API on your own, then
+  # uncomment the code below and paste in your keys
+  
+  #--------------------------UNCOMMENT IF YOU HAVE KEYS-------------------------------
+  # keys<- data.frame(
+  #                   consumer_key = YOUR_CONSUMER_KEY,
+  #                   consumer_secret = YOUR_CONSUMER_SECRET,
+  #                   access_key = YOUR_ACCESS_KEY,
+  #                   access_secret = YOUR_ACCESS_SECRET
+  #                 )
+  # 
+  # saveRDS(keys,'keys.RDS')
+  # remove(keys)
+
+
+if(file.exists('keys.RDS')){
+  
+  keys<-readRDS('keys.RDS')
+  
+  #Authenticate with twitter and your keys
+  twitteR::setup_twitter_oauth(
+                                consumer_key = keys$consumer_key[1],
+                                consumer_secret = keys$consumer_secret[1],
+                                access_token = keys$access_key[1],
+                                access_secret = keys$access_secret[1]
+                                )
+  
+  #Gym's account is WesternWeightRm.  Get the tweets with this command. 3200 is limit
+  gym.tweets = twitteR::userTimeline('WesternWeightRm',n = 3200) %>%
+               twitteR::twListToDF()
+  
+  #Create function to extract the weight room
+  get.wr<- function(x){
+    #Ensure all words are lower for consistency
+    words<- str_to_lower(x) %>% 
+            str_split(boundary('word')) %>% 
+            unlist
+    if('wr' %in% words){
+      #Here is heuristic.  WR and integer must be in tweet
+      number<- words %>% 
+               str_match_all("[0-9]+") %>% 
+               unlist %>%
+               as.numeric %>% 
+               max
+    }else{
+      number = -1
+    }
+      return(number)
+  }
+  
+  #Select only the columns I really care about  
+  tweet.data0<-gym.tweets %>% 
+            select(
+                    text,
+                    created,
+                    id
+                  ) 
+  
+  #Clean up the time zones and apply my function to extract the WR
+  tweet.data = tweet.data0 %>% 
+               mutate(
+                      created = ymd_hms(created, tz = 'UTC') %>% with_tz(tzone = 'America/Toronto') %>% as.character(),
+                      WR  = purrr::map_dbl(text,get.wr) 
+                    ) %>% 
+              filter(
+                      created>='2017-09-01'
+                      )
+  
+  #Connects to database housing historic tweets.  Will update db with new tweets.
+  db = dbConnect(SQLite(),'WRDB.sqlite3')
+  old.data = dbReadTable(db,'WeightRoom')
+  new.data = tweet.data %>% anti_join(old.data,'id')
+  dbWriteTable(db,'WeightRoom', new.data, overwrite = F, append = T)
+  dbDisconnect(db)
+  
+}
+
+
+
+
+```
+
+
+```{r}
+con <- dbConnect(SQLite(), 'WRDB.sqlite3')
+gym.tbl <-tbl(con,'WeightRoom') 
+
+gym.data<-gym.tbl %>% 
+          select(WR,created) %>% 
+          collect() %>% 
+          mutate(created = ymd_hms(created)) %>% 
+          tk_augment_timeseries_signature() %>% 
+          mutate(
+                date = date(created),
+                time = hour+minute/60,
+                is.weekday = if_else(wday.lbl %in% c('Saturday','Sunday'),'No','Yes') %>% factor(levels =c('Yes','No'), ordered = T)
+               ) %>% 
+          filter(date>'2017-09-07', year(date)==2017 )
+
+print.out<-gym.tbl %>%
+          collect()%>%
+          select(id,created,text,WR) %>% 
+          head()
+
+dbDisconnect(con)
+```
+
+
+#Extracting Important Time Features
+
+We are primarily interested in day to day changes in the number of students.  However, there may exist dynamics on the time scale of weeks, or months, that we would miss by only considering day to day or hour to hour trends.  For this reason, we leverage the use of `timetk` to extract other time information.  Doing so produces a dataframe with many columns, several of which are redundant.  Here, we choose just a few which we believe to be of particular importance to the problem.  In particular, we extract: weekday, day of year, month, week of month, week of year.  We also create feautures for time, date, if the day is a weekend, if the day has any particular significance (e.g. Homecoming or Holidays), and the number of days until the significant days end (for instance, the Saturday of Thanksgiving has a value of 3 since there are 3 days until school starts again).
+
+
+\begin{table}[ht!]
+\centering
+\begin{tabular}{|r|l|r|l}
+\hline
+WR & created & time & date \\
+\hline
+27 & 2017-09-08 06:30:18 & 6.50 & 2017-09-08 \\
+\hline
+37 & 2017-09-08 06:59:40 & 6.98 & 2017-09-08 \\
+\hline
+66 & 2017-09-08 07:30:14 & 7.50 & 2017-09-08 \\
+\hline
+70 & 2017-09-08 08:01:09 & 8.02 & 2017-09-08 \\
+\hline
+71 & 2017-09-08 09:02:18 & 9.03 & 2017-09-08 \\
+\hline
+69 & 2017-09-08 09:30:13 & 9.50 & 2017-09-08 \\
+\hline
+\end{tabular}
+\caption{The first half of the data after time feature extraction.  Variables for weekday, day of year, week of year, week of month are all included.  Not shown are other time variables generated which may be uninformative or redundant.}
+\end{table}
+
+\begin{table}[ht!]
+\centering
+\begin{tabular}{l|r|l|l|r|r|r|l|}
+\hline
+ wday.lbl & yday & is.weekday & month.lbl & mweek & week & remaining & is.special\\
+\hline
+Friday & 251 & Yes & September & 2 & 36 & 0 & No\\
+\hline
+ Friday & 251 & Yes & September & 2 & 36 & 0 & No\\
+\hline
+Friday & 251 & Yes & September & 2 & 36 & 0 & No\\
+\hline
+Friday & 251 & Yes & September & 2 & 36 & 0 & No\\
+\hline
+Friday & 251 & Yes & September & 2 & 36 & 0 & No\\
+\hline
+ Friday & 251 & Yes & September & 2 & 36 & 0 & No\\
+\hline
+\end{tabular}
+\caption{The other half of the data.  It's a very wide dataset.}
+
+\end{table}
+
+```{r}
+
+#Homecoming thrown by students
+faux.co <- date('2017-09-30')
+faux.co <- data.frame(date = faux.co, remaining = rev(c(1:length(faux.co))))
+
+#Thanksgiving and Fall reading week
+thanksgiving.and.break <- seq(date('2017-10-06'),date('2017-10-15'), by = 'days')
+thanksgiving.and.break <- data.frame(date = thanksgiving.and.break, remaining = rev(c(1:length(thanksgiving.and.break))))
+
+#Bind them together
+is.special= bind_rows(faux.co, thanksgiving.and.break) %>% mutate(is.special = 1)
+
+
+gd<-gym.data %>% 
+    select(
+            WR,
+            created,
+            time,
+            date,
+            wday.lbl,
+            yday,
+            is.weekday,
+            month.lbl,
+            mweek,
+            week
+          ) %>% 
+    left_join(is.special, on = date) %>% 
+    filter(WR>0)
+
+#Join performed in last step yields NA since it is a left join.  Fills those in.
+gd[is.na(gd)] = 0
+
+#Convert is special to Yes/No for plotting
+gd<- gd %>% 
+      mutate(
+              is.special = if_else(is.special==1,'Yes','No') %>% factor(levels = c('Yes','No'), ordered = T)
+            )
+```
+
+
+#Plots of Trends
+
+The time features allow examination of usage trends at several granularities.  Examining the trends on a monthly level shows a clear change in students's behaviour as the semester progresses.  In September, the peak gym usage occurs somewhere between 5 PM and 7PM.  As the months progress, peak usage occurs later, somewhere around 8 PM.  
+
+September seems to be the busiest month for the gym.  One possible explanation is that in this month, patrons are free of assignments and other responsibilities and may be free to go to the gym.  As the semester progresses, responsibilitie pile, and they may be less inclined to go.  October sees the coming and passing of midterms as well as the fall reading break. This makes October the month with the least usage.  Granularity can be further increased to the level of weekday.  Monday sees the largest temporal shift in peak use from the evening to late night, where as the middle weekdays see no shift in temporal peek use.  Friday's 
+temporal peak use regresses in October (likely due to exams) and then shifts to later in the evening in November.  Weekends see no drastic shifts in temporal peak use.
+
+
+```{r, fig.cap='Figure 1: A) Monthly usage trends.  Peak times appear to shift from mid day in September to late night in later months of the semester. B) Median usage per day plotted against time.  The fall reading break is clearly seen in October.'}
+mp<-gd %>% 
+  group_by(date) %>%
+  summarise(weight.room = median(WR)) %>% 
+  ggplot(
+        aes(date,weight.room, linetype = month(date,label = T, abbr = F))
+        ) +
+  geom_line()+
+  labs(title = 'Median Gym Use', x = 'Date', y = 'WR (Median)', linetype = 'Month')+
+  scale_color_brewer(palette = 'Set1')+
+  ylim(10,NA)
+
+
+p1<-gd %>% 
+    ggplot(aes(time,WR, color = is.weekday)) +
+    geom_point(alpha = 0.05, size = 1)+
+    geom_smooth(se = F)+
+    facet_wrap(~month.lbl, nrow = 1)+
+    scale_color_brewer(palette = 'Set1')+
+    labs( x = 'Time (Hour)', y = 'WR', color = 'Is Weekday')
+
+
+plot_grid(p1, mp, labels = NULL, ncol = 1, align = 'v', axis = 't')
+
+
+```
+
+
+
+
+
+```{r, fig.cap = "Plots of weight room activity split on days of the week.  There appears to be decreasing usage as the week progresses from Monday to Friday.", fig.height = 8, fig.width = 8}
+gd %>% 
+  filter(is.special=='No') %>% 
+  ggplot(aes(time,WR, color = month.lbl)) +
+  geom_smooth(se = F)+
+  geom_point(alpha = 0.25)+
+  facet_grid( month.lbl~ wday(date,label = T, abbr = F) %>% forcats::fct_shift())+
+  scale_color_brewer(palette = 'Set1')+
+  labs(x = 'Time (Hour)',color = 'Month')+
+  theme(legend.position = 'bottom', aspect.ratio = 1,
+        panel.grid.major = element_line(colour = "grey"))
+```
+
+
+#Modelling Considerations
+
+There are several considertions to be made before modelling the process can begin.  The first is that prediction for this specific problem is essentially a time series problem. However the times between observations are not uniformly spaced. The gym seems to try to tweet every thirty minutes, but on the rare occasion is delayed upwards of 50 minutes.  Observations could be rounded to the nearest hour or half hour in order to account for this. A summary statistic could also be chosen to be applied to all dates (e.g. the median), and this summary statistic could be forcasted through the use of time series methods.
+
+The WR variable is highly autocorrelated and heteroskedastic.  The heteroskedasticity can be dealt with by applying a transformation to the data.  Shown in figure 4 is a series of transformations one might apply, with the most effective transformation being the Box Cox Power Transformation.
+
+Lastly, if time series are not to be used, a typical train/test split is not the best approach for obtaining cross validated predictive accuracy since the observations are not independant.  Instead, a "walk forward" validation may be more appropriate.  Such methods are implemented in most machine learning libraries, such as R's `caret`.
+
+```{r, fig.cap="A selection of transforms to help remove skewness of the data.  The Box Cox transform (shown far left) does best as evidenced by the violin plot and Shapiro Wilks test ($p=0.13$)."}
+
+BCX = MASS::boxcox(gd$WR~1, plotit = F)
+
+ix = which.max(BCX$y)
+
+lambda = BCX$x[ix]
+
+
+gdg<-gd %>% 
+  select(WR) %>% 
+  mutate(
+          logWR = log(WR),
+          sqrtWR = sqrt(WR),
+          crtWR = WR^(1/3),
+          bcWR = (WR^lambda-1)/lambda
+        ) %>% 
+  gather(Transform,Value) %>% 
+  mutate(Transform = as_factor(Transform) 
+         )
+
+gdg %>% 
+  ggplot(aes(factor(1),Value))+
+  geom_violin(fill = 'gray')+
+  facet_wrap(~ordered(Transform, 
+                       levels = levels(gdg$Transform) %>% rev,
+                       labels = c('WR', 'log(WR)', 'sqrt(WR)','sqrt(WR,3)','BoxCox') %>% rev),
+              scales = 'free',
+              labeller=label_parsed,
+             nrow = 1)+
+  labs(x = '')+
+  scale_x_discrete(breaks = NULL)+
+  theme(aspect.ratio = 2)
+
+```
+
+# A Modest Attempt at Modelling
+
+In this section, we take a very modest approach to predictive modelling using a linear model and the `caret` package.  Statistical inference may be effected by the correlation of the observations, and so we do not consider any coefficients or hypothesis tests.  Instead, performance is measured by cross validated predictive power, in particular the the MAE.
+
+Three models are fit.  Each model is summarised in the table below.  The obtained MAE is 6.97, which is admirable for linear regression and noisy data.
+
+```{r}
+set.seed(19920908)
+
+#BoxCox Transform
+gd['bcWR'] = (gd$WR^lambda -1)/lambda
+
+
+#Remove ordering from factors
+gd <- gd %>% 
+      mutate_if( is.ordered,function(x) factor(x, ordered = F))
+
+
+#Train Control Methods
+myTimeControl<- trainControl(method = 'timeslice',
+                             initialWindow = 25*14,
+                             horizon = 25,
+                             fixedWindow = T
+                            )
+
+#Fit a model  + wday.lbl + yday
+lm.time = train(bcWR ~ poly(time,2),
+              data= gd,
+              method = 'lm',
+              trControl = myTimeControl
+              )
+
+lm.weekday =lm.time = train(bcWR ~ poly(time,2)+ wday.lbl,
+              data= gd,
+              method = 'lm',
+              trControl = myTimeControl
+              )
+
+lm.interaction =lm.time = train(bcWR ~ poly(time,2)*wday.lbl,
+              data= gd,
+              method = 'lm',
+              trControl = myTimeControl
+              )
+
+```
+
+
+\begin{table}[h!]
+\centering
+\begin{tabular}{lrr}
+  \hline
+  Model Formula & MAE & $R^2$ \\ 
+  \hline
+  WR \textasciitilde poly(time,2) & 8.14 & 0.5\\
+  WR \textasciitilde poly(time,2) + wday.lbl &  6.97 & 0.60\\
+  WR \textasciitilde poly(time,2):wday.lbl  & 8.15 &  0.5\\
+   \hline
+\end{tabular}
+\caption{Models fit to data and their cross validated measures of predictive accuracy.  The model which accounts for time of day and weekday performs best. }
+\end{table}
+
+
+
+
+```{r, fig.cap='Regression diagnostic plots for the linear model.  There appears to be a positive correlation in the errors, a sign that there is an underlying cause the model has not accounted for.'}
+
+gd['predicted'] = predict(lm.weekday, gd)
+gd['resid'] = (gd$bcWR - gd$predicted)
+
+
+preds<-gd %>% 
+  ggplot(aes(bcWR,predicted))+
+  geom_point(alpha = 0.5)+
+  geom_abline(color = 'orange')+
+  theme(aspect.ratio = 1)+
+  labs(x = 'WR (Box Cox)',y = 'Predicted')
+
+resids<-gd %>% 
+        ggplot(aes(bcWR, resid))+
+        geom_point(alpha = 0.25)+
+        geom_hline(aes(yintercept = 0), color = 'orange')+
+  labs(x = 'WR (Box Cox)',y = 'Residuals')+
+  theme(aspect.ratio = 1)
+
+  
+
+hist.er = gd %>% 
+          ggplot(aes(resid))+
+          geom_histogram()+
+          labs(x = 'Residuals')+
+          theme(aspect.ratio = 1/1.61)
+
+top_row = plot_grid(preds, resids, labels =NULL, ncol = 2, align = 'v', axis = 'h')
+
+plot_grid(top_row, hist.er, labels = NULL , nrow = 2, align = 'l', axis = 'l')
+
+
+
+```
+
+
+
+
+
+
+
+# Making Predictions
+
+Making future predictions is impressively easy with `caret` and `timetk`.  Simply pass the time features into `timetk`'s function `tk_make_future_series` and the library will return an array with future observation times spaced by the mean difference in the observed times (in our case that is very close to half an hour, but just slightly larger.  We can round the times to the nearest half hour using lubridate).  Passing those times into the `tk_augment_timeseires_signature` function will return appropriate time feautures we used for modelling, and then a small mutate to include our unique features finishes the job.
+
+Figure 6 shows the model predictions for the next 3 days.
+```{r, fig.cap='Predictions for the next three days.  Since this script is dynamic in time, predictions will change each day the script is run.', fig.height=3, fig.width=5}
+idx = tk_index(gd)
+
+future_series = data.frame( created =tk_make_future_timeseries(idx, n_future = 1000) )
+
+future_series = future_series %>% 
+                mutate(created = round_date(created, '30 mins')) %>% 
+                filter(
+                        between(date(created),today() + days(1) ,today()+ days(3)),
+                        between(hour(created),6,23)
+                        ) %>% 
+                tk_augment_timeseries_signature() %>% 
+                mutate(
+                        date = date(created),
+                        time = hour+minute/60,
+                        is.weekday = if_else(wday.lbl %in% c('Saturday','Sunday'),'No','Yes') %>% factor(levels =c('Yes','No'), ordered = T),
+                        day.lbl = case_when(
+                                            date== today()+days(1)~'Tomorrow',
+                                            date== today()+days(2)~'The Next Day',
+                                            date== today()+days(3)~'The Day After That',
+                                            ) %>% factor(levels = c('Tomorrow','The Next Day','The Day After That'), ordered = T)
+                       ) 
+
+future_series['predictions'] = predict(lm.weekday,newdata = future_series)
+future_series['predictions'] = (lambda*future_series$predictions +1)^(1/lambda)
+
+future_series %>% 
+  ggplot(aes(time,predictions))+
+  geom_line(aes(color = day.lbl,group = day.lbl), size = 1)+
+  scale_color_brewer(palette = 'Set1')+
+  labs(x = 'Time (Hour)', y = 'Predicted WR Numbers',color = '')+
+  theme(aspect.ratio = 1/1.61)+
+  scale_x_continuous(breaks = seq(6,24,by = 4) )+
+  scale_y_continuous(breaks = seq(0,150,by = 25))+
+  theme(legend.position = 'bottom')
+```
+
+#Conclusions, Discussion, and Next Steps
+
+The model is far from ideal. The residuals from the regression exhibit correlation, are ever so slightly positvely skewed, and the model can not account for sudden drops in usage due to holidays, exams, etc.  Furthermore, time is not the only variable that is informative for gym usage.  Weather (either too hot or too cold, the probability of precipitation, etc) has an enormous impact on gym usage, but as of now no weather data has been captured.  Including data on month or if the day is "special" often results in zero variance features for most window lengths, and so the impact of these features are hard to estimate using the methods implemented for this particular model.  Information on class schedules may also be useful.  It could be the case that sporadic increases in gym usage are due to classes letting out, or that dips in usage are due to the start of large classes.  The impact of class scheduling is purely conjecture at this moment.
+
+
+
+None the less, the model serves as an indicator of what gym usage possible could be, and is certainly better than instantaneously guessing what gym usage will be like in the coming hours.  The model has been implemented as a twitter accont and tweets out predictions each day approximately every hour.  Since the tweets are made automatically, this qualifies the account as a "bot".  This bot is named **GyMbo** (a homonym of the male name Jimbo and portmanteau of Gym Monitoring Robot) and is implemented in python.  Readers can follow the bot at @WesternGymBot.
+
+```{r out.width = '75%',echo=FALSE, fig.cap='GyMBo in Action!'}
+img <- readPNG("Figs/Gymbo_ex.png")
+grid.raster(img)
+```
+
+
